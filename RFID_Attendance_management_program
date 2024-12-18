@@ -1,0 +1,224 @@
+import os
+import time
+import schedule
+import subprocess
+import calendar
+import sqlite3
+import csv
+from datetime import datetime
+from tkinter import filedialog, Tk
+import RPi.GPIO as GPIO
+from mfrc522 import SimpleMFRC522
+import ntplib
+from smbus import SMBus
+import matplotlib.pyplot as plt
+import pandas as pd
+import matplotlib
+matplotlib.rcParams['font.family'] = 'Nanum Gothic'  # 라즈베리파이에서 한글 깨짐 방지
+matplotlib.rcParams['axes.unicode_minus'] = False    # 마이너스 기호 깨짐 방지
+
+def clear_terminal():
+    os.system('clear' if os.name == 'posix' else 'cls')
+
+def make_fullscreen():
+    print("\033[8;24;80t")  # 터미널 크기를 설정하는 ANSI escape sequence
+    os.system('resize -s 40 120')  # 행과 열을 조정
+
+def get_current_time():
+    ntp_client = ntplib.NTPClient()
+    NTP_SERVER = 'time.google.com'
+    try:
+        response = ntp_client.request(NTP_SERVER, version=3)
+        return datetime.fromtimestamp(response.tx_time)
+    except:
+        return datetime.now()  # RTC 예외처리 부분 생략
+
+# CSV 파일 저장 경로
+SAVE_PATH = os.path.expanduser("~/attendance_reports")
+os.makedirs(SAVE_PATH, exist_ok=True)
+
+# GPIO 설정 및 RFID 리더 설정
+GPIO.setmode(GPIO.BCM)
+reader = SimpleMFRC522()
+
+def get_monthly_csv_filename():
+    current_time = datetime.now()
+    return f"attendance_{current_time.year}_{current_time.month:02d}.csv"
+
+def save_attendance_to_csv():
+    current_time = datetime.now()
+    filename = get_monthly_csv_filename()
+    file_path = os.path.join(SAVE_PATH, filename)
+
+    # 데이터베이스에서 근무 기록 가져오기
+    conn = sqlite3.connect('attendance_system.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT employee_info.name, timetable.check_in_time, timetable.check_out_time
+        FROM timetable
+        JOIN employee_info ON timetable.rfid = employee_info.rfid
+    ''')
+
+    rows = cursor.fetchall()
+
+    # CSV 파일로 저장
+    with open(file_path, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(["이름", "출근 시간", "퇴근 시간"])
+        for row in rows:
+            writer.writerow(row)
+
+    conn.close()
+    print(f"근무 기록이 CSV 파일로 저장되었습니다: {file_path}")
+
+def main_menu():
+    while True:
+        clear_terminal()
+        print("근태관리 시스템 메뉴:")
+        print("1. 타임테이블 데이터베이스 확인")
+        print("2. 직원 정보 확인")
+        print("3. 새로운 직원 추가")
+        print("4. 근무자 출퇴근 기록 확인")
+        print("5. RFID 스캔 모드")
+        print("6. 종료")
+        choice = input("선택하세요 (1-6): ")
+
+        if choice == '1':
+            view_timetable()
+        elif choice == '2':
+            display_employee_info_plot()
+        elif choice == '3':
+            add_new_employee()
+        elif choice == '4':
+            display_daily_attendance_plot()
+        elif choice == '5':
+            enter_rfid_scan_mode()
+        elif choice == '6':
+            print("프로그램을 종료합니다.")
+            os._exit(0)  # 프로그램 강제 종료
+        else:
+            print("잘못된 입력입니다. 다시 시도해주세요.")
+
+# 타임테이블 확인 기능 변경
+def view_timetable():
+    clear_terminal()
+    print("저장된 타임테이블 CSV 파일이 열립니다.")
+    if os.path.exists(SAVE_PATH):
+        subprocess.run(['xdg-open', SAVE_PATH])  # Linux/Mac
+        # Windows의 경우: subprocess.run(['explorer', SAVE_PATH])
+    else:
+        print("경로를 찾을 수 없습니다.")
+
+def display_employee_info_plot():
+    clear_terminal()
+    print("직원 정보를 시각화합니다.")
+    conn = sqlite3.connect('attendance_system.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT name, contact, rfid FROM employee_info")
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        print("직원 정보가 없습니다.")
+        return
+
+    # 데이터 프레임 생성 및 시각화
+    df = pd.DataFrame(rows, columns=["이름", "연락처", "RFID"])
+    plt.figure(figsize=(10, 6))
+    plt.table(cellText=df.values, colLabels=df.columns, loc='center', cellLoc='center', rowLoc='center')
+    plt.axis('off')
+    plt.title("직원 정보")
+    plt.savefig("employee_info.png")
+    plt.show()
+
+def add_new_employee():
+    clear_terminal()
+    print("새로운 직원 추가: RFID 카드를 스캔하세요.")
+    rfid, _ = reader.read()
+    name = input("직원 이름: ")
+    contact = input("직원 연락처: ")
+    conn = sqlite3.connect('attendance_system.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO employee_info (name, contact, rfid)
+        VALUES (?, ?, ?)
+    ''', (name, contact, rfid))
+    conn.commit()
+    conn.close()
+    print("새 직원 정보가 추가되었습니다.")
+
+def display_daily_attendance_plot():
+    clear_terminal()
+    print("당일 근무자 출퇴근 기록을 시각화합니다.")
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    conn = sqlite3.connect('attendance_system.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT employee_info.name, timetable.check_in_time, timetable.check_out_time
+        FROM timetable
+        JOIN employee_info ON timetable.rfid = employee_info.rfid
+        WHERE DATE(timetable.check_in_time) = ?
+    ''', (current_date,))
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        print("오늘의 출퇴근 기록이 없습니다.")
+        return
+
+    # 데이터 프레임 생성 및 시각화
+    df = pd.DataFrame(rows, columns=["이름", "출근 시간", "퇴근 시간"])
+    plt.figure(figsize=(10, 6))
+    plt.table(cellText=df.values, colLabels=df.columns, loc='center', cellLoc='center', rowLoc='center')
+    plt.axis('off')
+    plt.title(f"{current_date} 출퇴근 기록")
+    plt.savefig("daily_attendance.png")
+    plt.show()
+
+def enter_rfid_scan_mode():
+    try:
+        while True:
+            print("RFID 스캔 모드입니다. 카드를 스캔하세요.")
+            rfid, _ = reader.read()
+            clear_terminal()  # 이전 로그 정리
+            print(f"카드 ID: {rfid} 읽음.")
+            time.sleep(3)  # 3초간 입력 방지
+            current_time = get_current_time()
+            conn = sqlite3.connect('attendance_system.db')
+            cursor = conn.cursor()
+
+            # 관리자 체크
+            cursor.execute("SELECT name, contact FROM employee_info WHERE rfid = ?", (rfid,))
+            row = cursor.fetchone()
+            if row and row[0] == "관리자" and row[1] == "000000000":
+                print("관리자 카드 인식: 메인 메뉴로 이동합니다.")
+                conn.close()
+                main_menu()
+                return
+
+            # 출퇴근 기록 처리
+            cursor.execute("SELECT * FROM timetable WHERE rfid = ? AND check_out_time IS NULL", (rfid,))
+            row = cursor.fetchone()
+            if row is None:
+                cursor.execute("INSERT INTO timetable (rfid, check_in_time) VALUES (?, ?)", (rfid, current_time))
+                print(f"출근 시간 기록 완료: {current_time}")
+            else:
+                cursor.execute("UPDATE timetable SET check_out_time = ? WHERE id = ?", (current_time, row[0]))
+                print(f"퇴근 시간 기록 완료: {current_time}")
+
+            conn.commit()
+            conn.close()
+            save_attendance_to_csv()
+    except Exception as e:
+        print(f"오류 발생: {str(e)}")
+    finally:
+        GPIO.cleanup()
+
+if __name__ == "__main__":
+    clear_terminal()
+    make_fullscreen()
+    try:
+        enter_rfid_scan_mode()
+    finally:
+        GPIO.cleanup()
