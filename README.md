@@ -1,6 +1,8 @@
 # RFID-Attendance-management-program
 Attendance management program with pi/ mfrc522
 
+** 스캔 화면에서 메인 메뉴로 들어가기 위해서는 이름 : 관리자, 전화번호 : 000000000의 정보를 가진 RFID 카드가 필요함. **
+
 
 1. 해당 코드는 ChatGPT를 통해 생성되었고 라이선스 규칙에 따라 코드 전부를 공개함.
 
